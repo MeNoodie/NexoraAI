@@ -13,6 +13,21 @@ export type GenerationSettings = {
   topP: number;
 };
 
+export type InferenceMode = "local" | "online";
+
+export type LocalModel = "domain" | "sft" | "dpo";
+
+export const inferenceModeDetails = {
+  local: {
+    label: "Local lab",
+    description: "Direct inference with a selected fine-tuned model",
+  },
+  online: {
+    label: "Online RAG",
+    description: "Retrieval-backed inference for deployment",
+  },
+} as const;
+
 export const suggestedPrompts = [
   "What is leave policy?",
   "What are office timings?",

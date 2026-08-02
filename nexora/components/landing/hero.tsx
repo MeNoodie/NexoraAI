@@ -44,16 +44,6 @@ export function Hero() {
               View Demo
             </ButtonLink>
           </div>
-          <div className="mt-10 grid max-w-xl grid-cols-2 gap-3 text-sm text-muted sm:grid-cols-3">
-            {["Policy-aware", "Private by design", "Fine-tuned"].map((item) => (
-              <div
-                key={item}
-                className="rounded-2xl border border-border bg-card/55 px-4 py-3"
-              >
-                {item}
-              </div>
-            ))}
-          </div>
         </motion.div>
 
         <motion.div

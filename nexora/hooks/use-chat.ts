@@ -6,6 +6,8 @@ import {
   initialMessages,
   type ChatMessage,
   type GenerationSettings,
+  type InferenceMode,
+  type LocalModel,
 } from "@/lib/chat";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -26,6 +28,8 @@ export function useChat() {
     maxTokens: 512,
     topP: 0.9,
   });
+  const [inferenceMode, setInferenceMode] = useState<InferenceMode>("online");
+  const [localModel, setLocalModel] = useState<LocalModel>("sft");
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const historyRef = useRef<Array<{ role: "user" | "assistant"; content: string }>>([]);
@@ -60,6 +64,8 @@ export function useChat() {
             history: historyRef.current.slice(0, -1),
             temperature: settings.temperature,
             max_tokens: settings.maxTokens,
+            inference_mode: inferenceMode,
+            local_model: localModel,
           }),
           signal: abortControllerRef.current.signal,
         });
@@ -125,6 +131,10 @@ export function useChat() {
     stopGenerating,
     clearChat,
     settings,
+    inferenceMode,
+    setInferenceMode,
+    localModel,
+    setLocalModel,
     historyItems,
   };
 }

@@ -1,7 +1,7 @@
 import { Bot, Github, Linkedin, Mail } from "lucide-react";
 
 const links = [
-  { href: "https://github.com", label: "GitHub", icon: Github },
+  { href: "https://github.com/MeNoodie/NexoraAI", label: "GitHub", icon: Github },
   { href: "https://linkedin.com", label: "LinkedIn", icon: Linkedin },
   { href: "mailto:hello@nexora.ai", label: "Email", icon: Mail },
 ];

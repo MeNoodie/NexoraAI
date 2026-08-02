@@ -1,7 +1,0 @@
-fastapi[standard]
-uvicorn[standard]
-llama-cpp-python
-huggingface_hub
-pydantic
-pydantic-settings
-python-dotenv
