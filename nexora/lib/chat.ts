@@ -15,7 +15,32 @@ export type GenerationSettings = {
 
 export type InferenceMode = "local" | "online";
 
-export type LocalModel = "domain" | "sft" | "dpo";
+export type LocalModel = "sft" | "dpo";
+
+export type ModelEvaluation = {
+  model: string;
+  scores: {
+    factual_correctness: number;
+    groundedness: number;
+    completeness: number;
+    policy_compliance: number;
+    clarity: number;
+  };
+  overall_score: number;
+  reasoning: string;
+};
+
+/** Shape of one entry from POST /api/v1/session/{id}/evaluate */
+export type EvaluationEntry = {
+  conversation_id: string;
+  question: string;
+  evaluation: {
+    evaluations: ModelEvaluation[];
+    best_model: string | null;
+    summary: string;
+    raw_output?: string;
+  };
+};
 
 export const inferenceModeDetails = {
   local: {

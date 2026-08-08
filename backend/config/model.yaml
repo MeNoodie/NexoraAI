@@ -1,0 +1,52 @@
+active_model: dpo
+
+models:
+  dpo:
+    label: DPO (RAG default)
+    path: Model_loader/Dpo_model/stage2_dpo_final_merged_model.Q4_K_M.gguf
+  sft:
+    label: SFT
+    path: Model_loader/SFT_model/stage1_instruction_merged_model.Q4_K_M.gguf
+  groq:
+    label: Groq
+    provider: groq
+    path: llama-3.3-70b-versatile
+  rag:
+    label: RAG
+    provider: groq
+    path: llama-3.3-70b-versatile
+
+rag:
+  source_document: Data/Nexora_Employee_Handbook_v3.1.pdf
+  index_path: D:\code.folder\Fullstack-AI\FineTune_Project\backend\Chromadb
+  # which local model to use when generating RAG answers (defaults to active_model)
+  use_model: dpo
+  embedding:
+    # desired embedding vector dimensionality (used for collection creation/validation)
+    dim: 1024
+    provider: huggingface
+    fallback_provider: gemini
+
+    huggingface:
+      model: sentence-transformers/all-roberta-large-v1
+    gemini:
+      model: gemini-embedding-001
+
+  chunk_size: 500
+  chunk_overlap: 150
+
+  top_k: 4
+  min_score: 0.12
+  mmr_fetch_k: 12 
+  mmr_lambda: 0.5
+
+  astradb:
+    collection_name: Nexora_handbook
+    # explicit namespace/keyspace to use in AstraDB (optional)
+    namespace: default_keyspace
+
+Evaluation_model:
+  models:
+    llama-3.3-70b-versatile:
+      provider: groq
+      path: llama-3.3-70b-versatile
