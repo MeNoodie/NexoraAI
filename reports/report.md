@@ -1,432 +1,1054 @@
-# Nexora AI: Technical Report
-
-**Project**: Domain-Specific HR Policy Assistant via 3-Stage LLM Fine-tuning
-**Model**: Qwen2.5-1.5B-Instruct → NexoraAI (DPO-aligned)
-**Version**: 0.1
-**Date**: July 2026
-
----
+# Nexora --- Complete Fine-Tuning & RAG Learning Report
 
 ## 1. Executive Summary
 
-This project delivers a production-ready HR policy chatbot for Nexora Technologies by fine-tuning a 1.5B parameter LLM through three progressive stages:
-1. **Non-instruction continued pretraining** on raw handbook text (domain adaptation)
-2. **Instruction fine-tuning (SFT)** on 497 curated Q&A pairs
-3. **DPO preference alignment** on 212 chosen/rejected pairs
+Nexora began as a domain fine-tuning experiment using a constrained
+**Qwen2.5-1.5B-Instruct** model.
 
-The final model (`meNoodie/NexoraAI`, GGUF q4_k_m) answers employee policy questions accurately, admits ignorance for out-of-scope topics, and avoids hallucinations common in small models.
+The initial hypothesis was:
 
----
-
-## 2. Problem Definition
-
-### 2.1 Business Need
-Nexora employees frequently ask HR repetitive questions about:
-- Sick leave entitlements (12 days/year, medical cert >3 days, no carryover)
-- Core values (8 values: Integrity, Innovation, Customer Service, Quality, Teamwork, Respect, Responsibility, Excellence)
-- Benefits (medical insurance, pension, paid holidays)
-- External feedback process
-- Policies NOT in handbook (remote work, attendance, maternity, salary, etc.)
-
-### 2.2 Technical Challenge
-**Small models (≤1.5B) struggle with:**
-- Catastrophic forgetting when fine-tuned on small datasets
-- Hallucinating plausible-sounding but false policies
-- Poor instruction following without explicit training
-- Repetitive/degenerate outputs ("Excellence excellence excellence")
-
-**Solution**: Progressive three-stage training with DPO alignment.
-
----
-
-## 3. Data Preparation
-
-### 3.1 Source Document
-- **File**: `Data/Nexora_Employee_Handbook_v3.1.pdf`
-- **Pages**: 40+ pages
-- **Extraction**: PyMuPDF (fitz) → clean paragraphs (min 80 chars)
-- **Output**: ~200 paragraph records with page metadata
-
-### 3.2 Stage 1: Domain Corpus (Non-Instruction)
-```
-Data/pharma_paragraph_process.jsonl  # ~200 records
-Format: {"text": "...", "source_page": N, "paragraph_id": M, "char_count": K}
-Split: 85% train / 15% validation
-Block size: 512 tokens (packed)
+``` text
+Handbook knowledge
+      ↓
+Instruction dataset
+      ↓
+SFT
+      ↓
+Domain-specialized model
 ```
 
-### 3.3 Stage 2: SFT Dataset
-```
-Data/sft_data.json  # 497 records
-Format: {"instruction": "...", "input": "", "output": "..."}
-Categories:
-  - Sick leave policy: 25 Qs
-  - Core values: 16 Qs
-  - Benefits: 12 Qs
-  - External feedback: 8 Qs
-  - Out-of-scope "I don't know": 60+ Qs
-  - Variations/paraphrases: ~376 Qs
-Split: 85% train / 15% validation
-Max length: 512 tokens
-```
+Evaluation showed that this was not reliable enough as a knowledge
+architecture. The model could learn task behavior but could still
+produce plausible, incorrect policy facts.
 
-### 3.4 Stage 3: DPO Preference Dataset
-```
-Data/dpo_data.json  # 212 records
-Format: {"prompt": "...", "chosen": "...", "rejected": "..."}
-Prompt template: System + Instruction + "### Response:"
-Design principles for rejected responses:
-  - Hallucinated policies (fake attendance rules, maternity leave, stock options)
-  - Repetitive token loops ("excellence excellence")
-  - Wrong facts (1 day sick leave, no pension, no insurance)
-  - Verbose markdown headers/lists (chosen = plain text)
+The project therefore evolved through:
+
+``` text
+Stage 1: SFT
+    ↓
+Stage 2: DPO
+    ↓
+DPO + RAG architecture
 ```
 
----
+The final architectural principle is:
 
-## 4. Training Methodology
+> **Fine-tuning teaches behavior. RAG supplies knowledge. Deterministic
+> tools handle exact calculations. Guardrails validate the system.**
 
-### 4.1 Stage 1: Non-Instruction Fine-tuning (Domain Adaptation)
+------------------------------------------------------------------------
 
-**Notebook**: `Notebook/policy_non_instruction_model.ipynb`
+# 2. Problem Definition
 
-| Config | Value |
-|--------|-------|
-| Base Model | TinyLlama-1.1B → Qwen2.5-1.5B-Instruct (Unsloth 4-bit) |
-| LoRA | r=16, α=32, dropout=0.05 |
-| Target Modules | All linear (q/k/v/o, gate/up/down) |
-| Quantization | 4-bit NF4, fp16 compute, double quant |
-| Batch Size | 1 (grad_accum=8 → effective=8) |
-| Learning Rate | 2e-4 |
-| Epochs | 3 |
-| Optimizer | AdamW 8-bit |
-| Packing | True (512-token blocks) |
+The target system was a Nexora HR assistant capable of answering
+employee handbook questions such as:
 
-**Key Code Pattern**:
-```python
-# Text packing for causal LM
-def create_training_blocks(tokenized_examples):
-    all_ids = concatenate(all input_ids)
-    blocks = split_into_chunks(all_ids, block_size=512)
-    labels = blocks.copy()  # causal LM
-    return {"input_ids": blocks, "labels": labels}
-```
+-   Sick Leave entitlement;
+-   probation duration;
+-   probation scenarios;
+-   Maternity Leave eligibility;
+-   Annual Leave accrual;
+-   benefits for contract employees;
+-   unsupported-benefit questions.
 
-**Training Logs** (TinyLlama attempt):
-```
-Step 1: loss=4.23
-Step 10: loss=2.87
-Step 25: loss=2.15
-Step 50: loss=1.89
-Final eval_loss: ~1.75
-```
-*Switched to Qwen2.5-1.5B after TinyLlama showed poor instruction capability.*
+The assistant needed more than generic language generation. It needed
+exact policy behavior, abstention, scenario handling, and resistance to
+hallucination.
 
-**Qwen2.5-1.5B Stage 1 (Unsloth)**:
-```
-Step 30: loss=1.42
-VRAM peak: 4.2 GB
-Time: ~3 min
-```
+------------------------------------------------------------------------
 
-### 4.2 Stage 2: Instruction Fine-tuning (SFT)
+# 3. Deployment Constraint
 
-**Notebook**: `Notebook/policy_SFT_model.ipynb`
+The project was intentionally constrained to approximately a **1.5B
+model** because of deployment limitations.
 
-| Config | Value |
-|--------|-------|
-| Base Model | Stage 1 merged model |
-| LoRA | New adapter (r=16, α=32, dropout=0.05) |
-| Format | `### Instruction:\n{inst}\n\n### Response:\n{out}` |
-| Max Length | 512 |
-| Packing | False (instruction boundaries matter) |
-| Epochs | 5 |
-| Learning Rate | 1e-4 |
-| Label Smoothing | Padding tokens → -100 |
+This created an important engineering question:
 
-**Training Logs**:
-```
-Epoch 1: train_loss=1.23, eval_loss=1.18
-Epoch 2: train_loss=0.98, eval_loss=0.95
-Epoch 3: train_loss=0.87, eval_loss=0.89
-Epoch 4: train_loss=0.81, eval_loss=0.85
-Epoch 5: train_loss=0.76, eval_loss=0.82
-```
+> How far can a small model be improved through fine-tuning, and where
+> should system architecture compensate for its limitations?
 
-**SFT Model Test Outputs**:
-```
-Q: "How many sick leaves do I get?"
-A: "Full-time employees at Nexora Technologies receive 12 days of paid sick leave per calendar year." ✓
+The model was later converted to GGUF for lightweight inference.
 
-Q: "What is the attendance policy?"
-A: "I am sorry, I do not have information regarding the attendance policy in the official company handbook." ✓
-```
+------------------------------------------------------------------------
 
-### 4.3 Stage 3: DPO Preference Alignment
+# 4. Stage 1 --- SFT
 
-**Notebook**: `Notebook/Dpo_model.ipynb` (Unsloth + TRL)
+## Initial approach
 
-| Config | Value |
-|--------|-------|
-| Base Model | Stage 2 merged model |
-| LoRA | New adapter (r=16, α=32, dropout=0.0) |
-| β (KL penalty) | 0.1 |
-| Learning Rate | 5e-5 |
-| Max Steps | 30 |
-| Batch Size | 1 (grad_accum=8) |
-| Padding | Left (critical for decoder-only DPO) |
-| Max Length | 1024 |
-| Reference Model | None (implicit via frozen base) |
+The first SFT dataset focused heavily on direct policy QA.
 
-**Training Logs**:
-```
-Step 1:  loss=0.68, chosen_reward=0.23, rejected_reward=-0.41
-Step 10: loss=0.42, chosen_reward=0.51, rejected_reward=-0.12
-Step 20: loss=0.35, chosen_reward=0.67, rejected_reward=-0.05
-Step 30: loss=0.31, chosen_reward=0.72, rejected_reward=0.01
-```
+Example:
 
-**Key DPO Insight**: Reward gap (chosen - rejected) widened from 0.64 → 0.71, confirming alignment.
-
----
-
-## 5. Model Comparison & Evaluation
-
-### 5.1 Test Questions & Outputs
-
-| # | Question | Base Qwen | SFT Only | **DPO Final** |
-|---|----------|-----------|----------|---------------|
-| 1 | How many sick leave days? | "Employees get sick leave per policy..." (vague) | "12 days per year" | "Full-time employees at Nexora Technologies receive 12 days of paid sick leave per calendar year." ✓ |
-| 2 | Can I cash out sick leave? | "Yes, you can encash..." ❌ (hallucination) | "No" | "No, unused sick leave cannot be encashed. All unused days are forfeited at year end." ✓ |
-| 3 | What are core values? | Lists 8 values + extra commentary | Lists 8 values | Lists 8 values concisely ✓ |
-| 4 | Attendance policy? | "99% attendance required..." ❌ | "I don't have info" ✓ | "I am sorry, I do not have information regarding the attendance policy..." ✓ |
-| 5 | Remote work allowed? | "Prohibited..." ❌ | "I don't have info" ✓ | "I am sorry, I do not have information regarding remote work policies..." ✓ |
-| 6 | Maternity leave? | "6 weeks" ❌ | "I don't have info" ✓ | "I am sorry... Please contact HR for details." ✓ |
-| 7 | Medical cert requirement? | Vague | "Required after 3 days" | "If sick leave exceeds 3 consecutive days, a medical certificate from a registered practitioner must be submitted within 48 hours of returning to work." ✓ |
-| 8 | Sick leave credited when? | "Monthly accrual" ❌ | "Start of year" | "Sick leave is credited in full at the start of each calendar year." ✓ |
-
-### 5.2 Qualitative Improvements from DPO
-
-| Issue | SFT Output | DPO Output |
-|-------|------------|------------|
-| Repetition | "Excellence. Excellence. Excellence." | Single mention |
-| Hallucination | "Stock options available" | "I don't have info" |
-| Format | Markdown headers, bullet lists | Plain text, no headers |
-| Verbosity | 3-4 paragraphs | 1-2 sentences |
-| Tone | Casual/conversational | Professional, direct |
-
-### 5.3 Quantitative Metrics (Approximate)
-
-| Metric | Base | SFT | DPO |
-|--------|------|-----|-----|
-| Perplexity (domain text) | ~12 | ~8 | ~7 |
-| Policy Accuracy (manual eval, 20 Qs) | 35% | 75% | **95%** |
-| Hallucination Rate | High | Medium | **Low** |
-| "I don't know" Rate (OOS) | 10% | 80% | **90%** |
-
----
-
-## 6. Technical Challenges & Solutions
-
-### 6.1 Challenge: TinyLlama Too Weak
-**Problem**: 1.1B params couldn't follow instructions even after SFT.
-**Solution**: Switched to Qwen2.5-1.5B-Instruct (Unsloth 4-bit). Pre-trained instruction following transferred well.
-
-### 6.2 Challenge: Catastrophic Forgetting
-**Problem**: Stage 2 SFT erased Stage 1 domain knowledge.
-**Solution**:
-- Progressive training (each stage starts from previous merged model)
-- Lower LR in later stages (2e-4 → 1e-4 → 5e-5)
-- LoRA on ALL linear layers, not just attention
-
-### 6.3 Challenge: Hallucination in Small Models
-**Problem**: Model invents policies (attendance, remote work, maternity).
-**Solution**:
-- Explicit "I don't know" examples in SFT (60+ samples)
-- DPO rejected samples = hallucinated policies
-- System prompt: "Answer using only handbook. If missing, say so."
-
-### 6.4 Challenge: Repetitive Degeneration
-**Problem**: "Excellence excellence excellence quality quality quality"
-**Solution**: DPO with repetitive rejected samples; repetition_penalty=1.1 at inference
-
-### 6.5 Challenge: DPO Padding Side
-**Problem**: Right-padding caused wrong logprob computation in DPO.
-**Solution**: `tokenizer.padding_side = "left"` for DPO stage only.
-
-### 6.6 Challenge: Colab Time Limits
-**Problem**: 12-hour sessions, GPU disconnections.
-**Solution**:
-- Max steps instead of epochs (30 steps/stage)
-- Gradient accumulation (effective batch=8)
-- Frequent checkpointing (save_steps=25)
-
----
-
-## 7. Hyperparameter Sensitivity Analysis
-
-| Param | Tested Values | Selected | Rationale |
-|-------|---------------|----------|-----------|
-| LoRA r | 8, 16, 32 | 16 | 8: underfit; 32: overfit/OOM |
-| LoRA α | 16, 32, 64 | 32 | α/r=2 standard; 64 too aggressive |
-| LoRA dropout | 0.05, 0.1, 0.0 | 0.05 (SFT), 0.0 (DPO) | DPO needs deterministic adapters |
-| LR (SFT) | 5e-5, 1e-4, 2e-4 | 1e-4 | 2e-4 unstable; 5e-5 slow |
-| LR (DPO) | 1e-5, 5e-5, 1e-4 | 5e-5 | Standard for 1.5B DPO |
-| DPO β | 0.05, 0.1, 0.2 | 0.1 | 0.05: weak alignment; 0.2: over-constrained |
-| Block size | 256, 512, 1024 | 512 (S1), 1024 (S3) | Balance context vs memory |
-
----
-
-## 8. Inference & Deployment
-
-### 8.1 Model Artifacts
-```
-Stage 1: adapter + merged (Qwen + domain LoRA)
-Stage 2: adapter + merged (Stage1 + SFT LoRA)
-Stage 3: adapter + merged (Stage2 + DPO LoRA) → FINAL
-GGUF: q4_k_m (~1.1 GB) for CPU/edge deployment
-```
-
-### 8.2 Inference Config
-```python
-generate_kwargs = {
-    "max_new_tokens": 150,
-    "do_sample": True,
-    "temperature": 0.7,
-    "top_p": 0.9,
-    "repetition_penalty": 1.1,
-    "pad_token_id": tokenizer.eos_token_id,
+``` json
+{
+  "instruction": "How many days of Annual Leave do full-time employees receive per year?",
+  "input": "",
+  "output": "Full-time employees are entitled to eighteen (18) days of Annual Leave per calendar year, accrued at the rate of 1.5 days per month."
 }
 ```
 
-### 8.3 Serving Architecture
-```
-User → Next.js Frontend (nexora/)
-       → FastAPI Backend (backend/app.py)
-       → Hugging Face Space (meNoodie/NexoraAI)
-       → GGUF model via llama-cpp-python
-```
+The assumption was that enough examples would make the model reliably
+remember Nexora facts.
 
-### 8.4 Frontend Features (nexora/)
-- Chat interface with streaming
-- Policy category quick-links
-- Dark/light theme
-- Mobile responsive
+------------------------------------------------------------------------
 
----
+# 5. Early SFT Failures
 
-## 9. Compute & Cost Analysis
+Observed examples included:
 
-| Stage | GPU | Time | VRAM | Cost (Colab Pro+) |
-|-------|-----|------|------|-------------------|
-| Stage 1 | T4 (16GB) | ~3 min | 4.2 GB | ~$0.15 |
-| Stage 2 | T4 | ~5 min | 4.5 GB | ~$0.25 |
-| Stage 3 | T4 | ~4 min | 4.8 GB | ~$0.20 |
-| **Total** | | **~12 min** | **<6 GB** | **~$0.60** |
-
-**GGUF Conversion**: 2 min on CPU
-
----
-
-## 10. Future Work (v0.2+)
-
-### 10.1 RAG Integration (Highest Priority)
-```
-Current: Parametric memory only → Hallucinations on edge cases
-Future:  Handbook chunks → Embeddings → Vector DB → Retrieve top-k → LLM
-Benefits:
-  - Grounded answers with citations
-  - Easy policy updates (re-index, no retrain)
-  - Handles 100+ page handbooks
-Tech: LangChain/LlamaIndex + FAISS/Chroma + bge-small-en-v1.5
+``` text
+Expected: 12 Sick Leave days
+Model:    10 days
 ```
 
-### 10.2 Voice Interface
-- **STT**: Whisper.cpp (local) or Whisper API
-- **TTS**: XTTS-v2, Piper, or Kokoro (low latency)
-- **Use case**: Hands-free policy queries
+and:
 
-### 10.3 Model Scaling
-| Model | Params | Expected Gain |
-|-------|--------|---------------|
-| Qwen2.5-3B-Instruct | 3B | Better reasoning, fewer hallucinations |
-| Qwen2.5-7B-Instruct | 7B | Near-70B quality on domain tasks |
-| Llama-3.2-3B-Instruct | 3B | Stronger instruction following |
-
-### 10.4 Evaluation Framework
-```python
-# Automated benchmark
-test_set = [
-    ("How many sick days?", "12 days per calendar year"),
-    ("Attendance policy?", "I don't have information"),
-    ...
-]
-metrics = {
-    "accuracy": exact_match(expected, generated),
-    "hallucination_rate": contains_false_policy(generated),
-    "refusal_rate": says_idk_when_appropriate(generated),
-    "style_score": no_headers_no_lists(generated)
-}
+``` text
+Expected: 90-day probation
+Model:    3–6 months
 ```
 
-### 10.5 Continuous Learning Pipeline
-- Webhook on handbook PDF change → Auto-extract → Retrain LoRA → Deploy
-- A/B testing: DPO vs SFT vs Base on live traffic
+and:
 
----
+``` text
+Expected:
+45 days < 90 days → still probationary
 
-## 11. Reproducibility Checklist
-
-- [x] All notebooks run sequentially (S1 → S2 → S3)
-- [x] Random seeds fixed (42)
-- [x] Data files versioned in repo
-- [x] HF model cards with training config
-- [x] GGUF quantization reproducible (q4_k_m)
-- [x] Requirements.txt pinned
-- [x] Inference script standalone
-
----
-
-## 12. Conclusion
-
-This project demonstrates that **small models (1.5B) can serve as reliable domain experts** when trained with a principled multi-stage pipeline:
-
-1. **Domain injection** via continued pretraining
-2. **Format alignment** via instruction tuning
-3. **Behavior correction** via preference optimization
-
-The DPO stage was critical for converting a "knowledgeable but verbose/hallucinating" SFT model into a "concise, honest, professional" assistant. The final GGUF model runs efficiently on CPU, making it deployable on standard infrastructure without GPU requirements.
-
-**Key Takeaway**: For domain-specific assistants, *training methodology > model size*. A well-tuned 1.5B model outperforms a poorly-tuned 7B model on narrow tasks.
-
----
-
-## Appendix: File Manifest
-
-```
-FineTune_Project/
-├── README.md                    # This project overview
-├── reports/report.md            # This technical report
-├── requirements.txt             # Training deps
-├── Data/
-│   ├── Nexora_Employee_Handbook_v3.1.pdf
-│   ├── sft_data.json           # 497 SFT samples
-│   └── dpo_data.json           # 212 DPO samples
-├── Notebook/
-│   ├── policy_non_instruction_model.ipynb
-│   ├── policy_SFT_model.ipynb
-│   └── Dpo_model.ipynb
-├── backend/
-│   ├── app.py                  # FastAPI proxy
-│   └── requirements.txt
-└── nexora/                     # Next.js frontend
-    ├── app/chat/page.tsx
-    ├── components/
-    └── package.json
+Model:
+No
 ```
 
-**HF Models**: `meNoodie/NexoraAI` (GGUF q4_k_m)
+These failures showed that the model was generating plausible HR
+knowledge instead of reliably following the specific Nexora policy.
 
----
+------------------------------------------------------------------------
 
-*Report generated for Nexora AI v0.1 — July 2026*
+# 6. Dataset Evolution
+
+The dataset expanded through multiple iterations, including:
+
+``` text
+621 examples
+~703 examples
+~1,298 examples
+```
+
+The major improvement was not merely the number of examples.
+
+The task definition changed.
+
+Instead of teaching:
+
+``` text
+"Memorize Nexora facts."
+```
+
+the training objective became:
+
+``` text
+"Answer questions using supplied evidence and exhibit desired behavior."
+```
+
+------------------------------------------------------------------------
+
+# 7. Final SFT Categories
+
+## 7.1 Factual QA
+
+Direct policy lookup.
+
+## 7.2 Paraphrase QA
+
+Different ways of asking the same policy question.
+
+## 7.3 Scenario QA
+
+Apply a policy to a concrete employee situation.
+
+## 7.4 Boundary / Negative QA
+
+Distinguish similar policies and thresholds.
+
+## 7.5 Abstention QA
+
+Teach the model not to invent unsupported information.
+
+## 7.6 Context-Grounded QA
+
+Teach the model to prioritize supplied context.
+
+This final category was particularly important for the later RAG
+architecture.
+
+------------------------------------------------------------------------
+
+# 8. Context-Grounded Learning
+
+A counterfactual context test was introduced.
+
+Example:
+
+``` text
+Policy Context:
+Employees receive exactly 17 Sick Leave days.
+
+Question:
+How many Sick Leave days do employees receive?
+```
+
+The expected result was:
+
+``` text
+17 days
+```
+
+rather than a previously learned Nexora value.
+
+Another test changed the workweek to:
+
+``` text
+32 hours
+```
+
+and the model was expected to return:
+
+``` text
+32 hours
+```
+
+This showed that context-following could be learned and tested
+independently of factual memorization.
+
+------------------------------------------------------------------------
+
+# 9. SFT Configuration
+
+``` text
+Base model:               Qwen2.5-1.5B-Instruct
+Quantization:             4-bit
+
+LoRA rank:                16
+LoRA alpha:               32
+LoRA dropout:             0.05
+
+Sequence length:          1024
+Batch size:               4
+Gradient accumulation:    8
+Effective batch size:     32
+
+Learning rate:            5e-5
+Epochs:                   5
+Warmup ratio:             0.05
+Optimizer:                AdamW 8-bit
+```
+
+Trainable parameters:
+
+``` text
+18,464,768
+```
+
+Total:
+
+``` text
+1,562,179,072
+```
+
+Trainable:
+
+``` text
+1.182%
+```
+
+------------------------------------------------------------------------
+
+# 10. SFT Results
+
+A major run produced:
+
+``` text
+Train time/sec:          884.77
+Peak allocated VRAM/GB:  2.741
+Peak reserved VRAM/GB:   2.85
+
+global_step:              205
+training_loss:            1.1964303156224694
+epoch:                    5.0
+```
+
+Earlier runs showed training losses around:
+
+``` text
+1.89387
+1.52361
+```
+
+The lower loss indicated improved training fit, but evaluation showed
+that loss alone was not enough.
+
+------------------------------------------------------------------------
+
+# 11. SFT Evaluation Findings
+
+### Successful behaviors
+
+-   direct policy extraction;
+-   context-grounded answering;
+-   false-assumption correction in many cases;
+-   unsupported-question abstention;
+-   some scenario reasoning.
+
+### Failures
+
+#### Boundary reasoning
+
+``` text
+Probation = 90 days
+Employee = 95 days
+
+Expected:
+No
+
+Observed failure:
+Yes
+```
+
+#### Arithmetic
+
+``` text
+1.5 × 4 = 6
+
+Observed failure:
+27
+```
+
+#### Insurance
+
+``` text
+INR 10,00,000 × 5
+= INR 50,00,000
+
+Observed:
+incorrect larger amount
+```
+
+These failures were important because the relevant information was
+already present. They were generation/reasoning problems rather than
+retrieval problems.
+
+------------------------------------------------------------------------
+
+# 12. Stage 1 Conclusion
+
+SFT demonstrated:
+
+``` text
+Small model
++
+good instruction data
+→
+better domain behavior
+```
+
+But it did not demonstrate:
+
+``` text
+Small model
+→
+perfect policy database
+```
+
+This distinction changed the architecture.
+
+------------------------------------------------------------------------
+
+# 13. Stage 2 --- DPO
+
+DPO was introduced after SFT.
+
+SFT teaches:
+
+``` text
+What should a good answer look like?
+```
+
+DPO adds:
+
+``` text
+Which of these two answers should be preferred?
+```
+
+This allowed realistic failure modes to be explicitly contrasted with
+desirable responses.
+
+------------------------------------------------------------------------
+
+# 14. DPO Dataset
+
+Observed size:
+
+``` text
+243 preference pairs
+```
+
+Each example contained:
+
+``` text
+prompt
+chosen
+rejected
+```
+
+The rejected answer was intentionally plausible.
+
+Examples included:
+
+-   wrong policy values;
+-   generic HR answers;
+-   hallucinated benefits;
+-   incorrect eligibility;
+-   wrong arithmetic;
+-   unsupported continuation;
+-   failure to abstain.
+
+------------------------------------------------------------------------
+
+# 15. DPO Configuration
+
+``` text
+Preference pairs:    243
+Epochs:              2
+Learning rate:       1e-5
+Beta:                0.1
+```
+
+Result:
+
+``` text
+Train time/sec:          225.17
+Peak allocated VRAM/GB:  8.889
+Peak reserved VRAM/GB:  11.527
+
+global_step:              16
+training_loss:            0.5524674281477928
+epoch:                    2.0
+```
+
+The smaller DPO dataset motivated a conservative two-epoch starting
+point.
+
+------------------------------------------------------------------------
+
+# 16. DPO Formatting Debugging
+
+The DPO pipeline required careful inspection of chat-template
+boundaries.
+
+The desired structure was:
+
+``` text
+System
+↓
+User
+↓
+Assistant generation boundary
+↓
+chosen/rejected completion
+↓
+<|im_end|>
+```
+
+The Qwen tokenizer used:
+
+``` text
+EOS:
+<|im_end|>
+
+EOS ID:
+151645
+```
+
+Chosen and rejected completions were checked to ensure their final token
+was:
+
+``` text
+151645
+```
+
+This demonstrated an important practical lesson:
+
+> Tokenization and chat formatting are part of the training pipeline,
+> not merely presentation details.
+
+------------------------------------------------------------------------
+
+# 17. DPO Improvements
+
+Observed improvements included:
+
+### Eligibility
+
+Better handling of:
+
+``` text
+85 days >= 80-day minimum
+```
+
+### Leave calculation
+
+Improved behavior for:
+
+``` text
+1.5 × 4 = 6
+```
+
+### Context override
+
+The model continued to follow supplied values such as:
+
+``` text
+17 Sick Leave days
+32-hour workweek
+```
+
+### Abstention
+
+The model generally avoided inventing unsupported benefits when the
+context was insufficient.
+
+------------------------------------------------------------------------
+
+# 18. Remaining DPO Problems
+
+The DPO model was still not perfect.
+
+Remaining issues included:
+
+-   some threshold/boundary reasoning;
+-   some arithmetic;
+-   occasional unnecessary continuation;
+-   possible hallucination without external evidence.
+
+This was the point where more training was not automatically the best
+solution.
+
+------------------------------------------------------------------------
+
+# 19. The Architecture Shift
+
+The project changed from:
+
+``` text
+Question
+  ↓
+Model remembers policy
+  ↓
+Answer
+```
+
+to:
+
+``` text
+Question
+  ↓
+Retrieve policy evidence
+  ↓
+DPO model uses evidence
+  ↓
+Answer
+```
+
+This was the most important architectural decision in the project.
+
+------------------------------------------------------------------------
+
+# 20. SFT vs DPO vs DPO + RAG
+
+The final evaluation setup is:
+
+### SFT
+
+``` text
+SFT GGUF
++
+SFT prompt
++
+Question
+```
+
+### DPO
+
+``` text
+DPO GGUF
++
+DPO prompt
++
+Question
+```
+
+### DPO + RAG
+
+``` text
+Question
+ ↓
+Retriever
+ ↓
+Handbook context
+ ↓
+DPO GGUF
++
+RAG prompt
++
+Context
++
+Question
+```
+
+There is no separate RAG model.
+
+RAG is a system architecture around the DPO generator.
+
+------------------------------------------------------------------------
+
+# 21. Why RAG?
+
+The handbook is the source of truth.
+
+Fine-tuning stores behavior in weights, but policy knowledge should
+remain external because:
+
+-   policies change;
+-   retrieval provides evidence;
+-   sources can be cited;
+-   updates do not require retraining;
+-   access control can be applied at retrieval;
+-   debugging is easier.
+
+------------------------------------------------------------------------
+
+# 22. Retrieval Design
+
+The planned pipeline:
+
+``` text
+PDF
+ ↓
+Parser
+ ↓
+Section-aware chunking
+ ↓
+Metadata
+ ↓
+Embedding model
+ ↓
+Vector database
+ ↓
+Top-K retrieval
+ ↓
+Hybrid search / reranking
+ ↓
+DPO model
+```
+
+Important metadata:
+
+``` text
+page
+section
+subsection
+policy type
+document version
+effective date
+source
+```
+
+------------------------------------------------------------------------
+
+# 23. Chunking Lesson
+
+Naive chunking:
+
+``` text
+Every N characters
+```
+
+can split policy rules incorrectly.
+
+A better strategy is:
+
+``` text
+Policy section
+ ↓
+Semantically complete rule
+```
+
+For eligibility policies, related facts should remain together where
+possible.
+
+Example:
+
+``` text
+Minimum continuous employment = 80 days
+Entitlement = 26 weeks
+```
+
+------------------------------------------------------------------------
+
+# 24. Retrieval vs Generation Diagnosis
+
+When the final answer is wrong:
+
+``` text
+Was the correct evidence retrieved?
+```
+
+If:
+
+``` text
+NO
+```
+
+the problem is likely:
+
+``` text
+chunking
+embedding
+query
+retrieval
+reranking
+```
+
+If:
+
+``` text
+YES
+```
+
+but the answer is wrong:
+
+``` text
+prompt
+generation
+model
+guardrail
+```
+
+This diagnostic separation is one of the most important lessons from the
+project.
+
+------------------------------------------------------------------------
+
+# 25. Deterministic Tools
+
+The experiments showed that some operations are better handled outside
+the LLM.
+
+Examples:
+
+``` python
+probationary = days_since_joining < 90
+annual_leave = 1.5 * months_completed
+insurance = annual_ctc * 5
+```
+
+The model can then explain the deterministic result.
+
+This creates a clean separation:
+
+``` text
+RAG
+→ policy evidence
+
+Tools
+→ exact computation
+
+LLM
+→ language + behavior
+```
+
+------------------------------------------------------------------------
+
+# 26. Guardrails
+
+The final system should include:
+
+### Input guardrails
+
+-   prompt injection checks;
+-   scope validation;
+-   query normalization.
+
+### Output guardrails
+
+-   evidence validation;
+-   unsupported-number checks;
+-   hallucination detection;
+-   concise-answer constraints;
+-   citation validation.
+
+------------------------------------------------------------------------
+
+# 27. Evaluation Framework
+
+A serious evaluation should not report only one accuracy number.
+
+Measure:
+
+### Retrieval
+
+-   Recall@K;
+-   MRR;
+-   hit rate;
+-   reranker quality.
+
+### Generation
+
+-   factual correctness;
+-   groundedness;
+-   hallucination rate;
+-   abstention accuracy;
+-   reasoning;
+-   arithmetic;
+-   conciseness.
+
+### End-to-end
+
+``` text
+Question
+→ retrieval
+→ context
+→ generation
+→ final answer
+```
+
+The same held-out questions should be evaluated across:
+
+``` text
+SFT
+DPO
+DPO + RAG
+```
+
+------------------------------------------------------------------------
+
+# 28. Key Experimental Test Types
+
+## Direct fact
+
+``` text
+How many Sick Leave days?
+```
+
+## False assumption
+
+``` text
+I heard it is 10 days. Is that correct?
+```
+
+## Boundary
+
+``` text
+90-day probation.
+I joined 95 days ago.
+```
+
+## Abstention
+
+``` text
+Does the handbook mention free Netflix?
+```
+
+## Counterfactual context
+
+``` text
+Context says 17 days.
+What is the entitlement?
+```
+
+## Calculation
+
+``` text
+1.5 days/month × 4 months
+```
+
+These tests expose different failure modes.
+
+------------------------------------------------------------------------
+
+# 29. Main Lessons
+
+## Dataset design \> raw dataset size
+
+Adding examples helped, but changing the learning objective was more
+important.
+
+## Fine-tuning ≠ knowledge database
+
+A small model should not be trusted as the authoritative policy store.
+
+## DPO ≠ magic
+
+DPO improves preference behavior but does not eliminate all reasoning
+errors.
+
+## RAG ≠ automatic grounding
+
+The generator still needs to use the retrieved evidence correctly.
+
+## Training loss ≠ product quality
+
+Behavioral evaluation is mandatory.
+
+## Tools beat LLM arithmetic
+
+Use deterministic computation when exactness matters.
+
+## Diagnose before retraining
+
+Identify whether the failure belongs to:
+
+``` text
+Data
+Prompt
+Retrieval
+Generation
+Calculation
+Guardrails
+```
+
+## Know when to stop
+
+Additional training is not always the highest-value next step.
+
+------------------------------------------------------------------------
+
+# 30. Interview-Level Explanation
+
+### Why fine-tune?
+
+> I used SFT to teach the small model domain-specific task behavior such
+> as concise HR responses, context following, abstention, paraphrase
+> handling, and policy scenarios.
+
+### Why DPO?
+
+> I used DPO to explicitly prefer grounded and concise answers over
+> realistic hallucinated or incorrect alternatives.
+
+### Why RAG?
+
+> The handbook is the authoritative and changing source of truth, so I
+> moved knowledge retrieval outside the model weights.
+
+### Why a 1.5B model?
+
+> Deployment constraints required a lightweight model, so I compensated
+> with fine-tuning, retrieval, deterministic tools, and guardrails.
+
+### What failed?
+
+> The model still showed weaknesses in boundary reasoning, arithmetic,
+> and occasional unsupported continuation.
+
+### What did you do?
+
+> Instead of endlessly increasing training, I moved knowledge into RAG
+> and exact operations into deterministic tools.
+
+------------------------------------------------------------------------
+
+# 31. What This Project Taught
+
+The project changed the mental model from:
+
+``` text
+"How do I make the LLM know everything?"
+```
+
+to:
+
+``` text
+"Which subsystem should solve each problem?"
+```
+
+The final mapping is:
+
+``` text
+Policy knowledge
+→ RAG
+
+Response behavior
+→ SFT / DPO
+
+Exact calculations
+→ deterministic tools
+
+Safety / evidence validation
+→ guardrails
+
+System reliability
+→ evaluation + monitoring
+```
+
+------------------------------------------------------------------------
+
+# 32. Final Architecture
+
+``` text
+                         ┌─────────────────────┐
+                         │  Nexora Handbook    │
+                         │   SOURCE OF TRUTH   │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                              RAG Retrieval
+                                    │
+                                    ▼
+                            Policy Evidence
+                                    │
+                                    ▼
+Employee Question ───────────► DPO Model
+                                    │
+                         ┌──────────┴──────────┐
+                         │                     │
+                    Rule / Tool          Language
+                    Computation          Generation
+                         │                     │
+                         └──────────┬──────────┘
+                                    ▼
+                               Guardrails
+                                    │
+                                    ▼
+                              Final Answer
+```
+
+------------------------------------------------------------------------
+
+# 33. Final Reflection
+
+The most valuable result was not a particular loss value.
+
+It was the engineering progression:
+
+``` text
+Assumption
+   ↓
+Experiment
+   ↓
+Failure
+   ↓
+Evaluation
+   ↓
+Diagnosis
+   ↓
+Architecture change
+```
+
+The project started by trying to teach a small model the handbook.
+
+It ended with a better architecture:
+
+> **Keep knowledge external, fine-tune behavior, use deterministic tools
+> for exact operations, and evaluate every subsystem independently.**
+
+That is the central learning outcome of Nexora.
