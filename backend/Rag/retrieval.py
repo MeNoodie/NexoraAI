@@ -16,12 +16,13 @@ def _get_retriever():
     if _retriever is None:
         with _lock:
             if _retriever is None:
+                current_settings = load_settings()
                 _retriever = get_vector_store().as_retriever(
                     search_type="mmr",
                     search_kwargs={
-                        "k": settings.rag["top_k"],
-                        "fetch_k": settings.rag["mmr_fetch_k"],
-                        "lambda_mult": settings.rag["mmr_lambda"],
+                        "k": current_settings.rag["top_k"],
+                        "fetch_k": current_settings.rag["mmr_fetch_k"],
+                        "lambda_mult": current_settings.rag["mmr_lambda"],
                     },
                 )
     return _retriever

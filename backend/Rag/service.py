@@ -10,59 +10,11 @@ from backend.Rag.ingestion import ingest_documents
 from backend.storage.session_store import SessionStore, Session, Conversation, Response
 from backend.model_loader._model import get_llm_for_model
 from backend.Eval.evaluator import evaluate_responses
-from backend.prompts.prompts import (
-    DPO_SYSTEM_PROMPT_TEMPLATE,
-    SFT_HR_SYSTEM_PROMPT,
-)
+from backend.prompts.prompts import RAG_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
 
-def _build_chat_messages(
-    model_name: str,
-    question: str,
-    context: str,
-) -> list[dict[str, str]]:
-    """Build system/user message list for create_chat_completion().
-
-    DPO model:
-        The retrieved policy context is injected directly into the system
-        message. The user message contains only the bare question. This
-        forces the model to treat the policy as the authoritative source.
-
-    SFT model:
-        Uses the general HR system prompt. The context (if any) is prepended
-        to the user message so the model can reference it without the same
-        strict grounding rules applied to DPO.
-    """
-    if model_name == "dpo":
-        if context:
-            system_content = DPO_SYSTEM_PROMPT_TEMPLATE.substitute(
-                retrieved_context=context
-            )
-        else:
-            # No RAG context available — fall back to a minimal DPO prompt
-            system_content = (
-                "You are Nexora, an HR policy assistant. "
-                "Answer the employee's question professionally and concisely. "
-                "If you are uncertain, say so clearly."
-            )
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": question},
-        ]
-
-    else:
-        # SFT model: use the original HR system prompt
-        user_content = question
-        if context:
-            user_content = (
-                f"Policy context:\n{context}\n\nQuestion: {question}"
-            )
-        return [
-            {"role": "system", "content": SFT_HR_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
 
 
 class RagService:
@@ -131,49 +83,30 @@ class RagService:
 
         for model_name in target_models:
             try:
+                logger.info("Invoking model '%s' with prompt length %d.", model_name, len(prompt))
                 llm = get_llm_for_model(model_name)
-
                 if hasattr(llm, "invoke"):
-                    # ── Groq cloud model (evaluation only — not used for answers) ──
                     result = llm.invoke(prompt)
                     response_text = getattr(result, "content", str(result))
-
                 else:
-                    # ── Local GGUF model ──────────────────────────────────────────
-                    # Use create_chat_completion() so the ChatML template
-                    # (<|im_start|>system…<|im_end|>) is applied correctly.
-                    # create_completion() bypasses the template and degrades quality.
-                    messages = _build_chat_messages(model_name, question, context_text)
-                    logger.info(
-                        "Invoking model '%s' via chat completion (%d-char context).",
-                        model_name,
-                        len(context_text),
-                    )
-                    result = llm.create_chat_completion(
-                        messages=messages,
-                        max_tokens=256,
-                        temperature=0.1,
-                        top_p=0.85,
-                        repeat_penalty=1.1,
-                        seed=42,
-                        stop=["<|im_end|>", "<|im_start|>"],
-                    )
-                    response_text = result["choices"][0]["message"]["content"].strip()
-
+                    result = llm.create_completion(prompt=prompt, max_tokens=256)
+                    response_text = result["choices"][0]["text"]
                 logger.info("Model '%s' responded with %d chars.", model_name, len(response_text))
             except Exception as exc:
                 logger.error("Model '%s' failed: %s", model_name, exc)
                 response_text = f"[Error generating response with {model_name}: {exc}]"
 
+            display_name = "Rag" if (model_name == "dpo" and use_rag) else model_name
+
             self._session_store.create_response(
                 conversation_id=conversation.id,
-                model_name=model_name,
+                model_name=display_name,
                 response_text=response_text,
             )
 
             responses.append(
                 {
-                    "model_name": model_name,
+                    "model_name": display_name,
                     "response_text": response_text,
                 }
             )
@@ -228,7 +161,10 @@ class RagService:
                 continue
 
             answers = [
-                {"model_name": resp.model_name, "response_text": resp.response_text}
+                {
+                    "model_name": "Rag" if (resp.model_name == "dpo" and conv.retrieved_context) else resp.model_name,
+                    "response_text": resp.response_text,
+                }
                 for resp in responses
             ]
 
@@ -246,9 +182,26 @@ class RagService:
                     "summary": f"Evaluation failed: {exc}",
                 }
 
+            # Normalize model name from 'dpo' to 'Rag' in evaluation results when RAG is used
+            if conv.retrieved_context and isinstance(eval_result, dict):
+                for item in eval_result.get("evaluations", []):
+                    if str(item.get("model", "")).lower() in ("dpo", "dpo model"):
+                        item["model"] = "Rag"
+                if str(eval_result.get("best_model", "")).lower() in ("dpo", "dpo model"):
+                    eval_result["best_model"] = "Rag"
+                if "summary" in eval_result and isinstance(eval_result["summary"], str):
+                    eval_result["summary"] = (
+                        eval_result["summary"]
+                        .replace("model dpo", "model Rag")
+                        .replace("dpo model", "Rag model")
+                        .replace("dpo", "Rag")
+                        .replace("DPO", "Rag")
+                    )
+
             for resp in responses:
+                target_name = "Rag" if (resp.model_name in ("dpo", "Rag") and conv.retrieved_context) else resp.model_name
                 model_eval = next(
-                    (e for e in eval_result.get("evaluations", []) if e.get("model") == resp.model_name),
+                    (e for e in eval_result.get("evaluations", []) if e.get("model") in (target_name, resp.model_name)),
                     None,
                 )
                 if model_eval:

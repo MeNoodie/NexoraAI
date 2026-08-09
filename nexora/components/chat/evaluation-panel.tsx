@@ -10,13 +10,14 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
-import type { EvaluationEntry, ModelEvaluation } from "@/lib/chat";
+import type { EvaluationEntry, InferenceMode, ModelEvaluation } from "@/lib/chat";
 import { Button } from "@/components/ui/button";
 
 type EvaluationPanelProps = {
   onEvaluate: () => void;
   isEvaluating: boolean;
   results: EvaluationEntry[];
+  inferenceMode?: InferenceMode;
 };
 
 const SCORE_LABELS: Record<string, string> = {
@@ -26,6 +27,18 @@ const SCORE_LABELS: Record<string, string> = {
   policy_compliance: "Policy",
   clarity: "Clarity",
 };
+
+function formatModelName(name: string, isLocal: boolean): string {
+  if (!name) return name;
+  const lower = name.toLowerCase();
+  if (isLocal) {
+    if (lower === "rag") return "DPO";
+    return name.toUpperCase();
+  } else {
+    if (lower === "dpo") return "RAG";
+    return name.toUpperCase();
+  }
+}
 
 function ScoreBar({ label, value }: { label: string; value: number }) {
   const pct = Math.round((value / 5) * 100);
@@ -42,8 +55,18 @@ function ScoreBar({ label, value }: { label: string; value: number }) {
   );
 }
 
-function ModelCard({ modelEval, isBest }: { modelEval: ModelEvaluation; isBest: boolean }) {
+function ModelCard({
+  modelEval,
+  isBest,
+  isLocal,
+}: {
+  modelEval: ModelEvaluation;
+  isBest: boolean;
+  isLocal: boolean;
+}) {
   const { model, scores, overall_score, reasoning } = modelEval;
+  const displayName = formatModelName(model, isLocal);
+
   return (
     <div
       className={`rounded-xl border p-3 text-xs ${
@@ -51,7 +74,7 @@ function ModelCard({ modelEval, isBest }: { modelEval: ModelEvaluation; isBest: 
       }`}
     >
       <div className="flex items-center justify-between gap-2 mb-2">
-        <span className="font-semibold uppercase tracking-wide text-foreground">{model}</span>
+        <span className="font-semibold uppercase tracking-wide text-foreground">{displayName}</span>
         <div className="flex items-center gap-1">
           {isBest && <Trophy className="size-3 text-emerald-500" />}
           <span
@@ -76,8 +99,14 @@ function ModelCard({ modelEval, isBest }: { modelEval: ModelEvaluation; isBest: 
   );
 }
 
-export function EvaluationPanel({ onEvaluate, isEvaluating, results }: EvaluationPanelProps) {
+export function EvaluationPanel({
+  onEvaluate,
+  isEvaluating,
+  results,
+  inferenceMode = "local",
+}: EvaluationPanelProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const isLocal = inferenceMode === "local";
 
   return (
     // Fixed to bottom-right corner
@@ -111,11 +140,6 @@ export function EvaluationPanel({ onEvaluate, isEvaluating, results }: Evaluatio
 
             {/* Panel body */}
             <div className="p-4">
-              <p className="text-xs text-muted leading-5 mb-3">
-                Groq judges each answer against the retrieved handbook context on
-                factual accuracy, groundedness, completeness, policy compliance, and clarity.
-              </p>
-
               <Button
                 className="w-full"
                 onClick={onEvaluate}
@@ -147,6 +171,16 @@ export function EvaluationPanel({ onEvaluate, isEvaluating, results }: Evaluatio
                   const summary = entry.evaluation?.summary;
                   const rawOutput = entry.evaluation?.raw_output;
 
+                  const displayBestModel = bestModel
+                    ? formatModelName(bestModel, isLocal)
+                    : null;
+
+                  const displaySummary = summary
+                    ? isLocal
+                      ? summary.replace(/rag/gi, "DPO")
+                      : summary.replace(/dpo/gi, "RAG")
+                    : null;
+
                   return (
                     <article key={`${entry.conversation_id}-${idx}`} className="space-y-2">
                       <p className="text-xs font-medium text-foreground truncate" title={entry.question}>
@@ -160,6 +194,7 @@ export function EvaluationPanel({ onEvaluate, isEvaluating, results }: Evaluatio
                             key={modelEval.model}
                             modelEval={modelEval}
                             isBest={modelEval.model === bestModel}
+                            isLocal={isLocal}
                           />
                         ))
                       ) : rawOutput ? (
@@ -171,15 +206,17 @@ export function EvaluationPanel({ onEvaluate, isEvaluating, results }: Evaluatio
                         <p className="text-xs text-muted">No evaluation data.</p>
                       )}
 
-                      {summary && (
+                      {displaySummary && (
                         <div className="rounded-xl border border-border bg-muted/5 p-3 text-xs">
                           <p className="text-muted font-medium mb-1">
                             Summary
-                            {bestModel && (
-                              <span className="ml-2 text-emerald-400">· Best: {bestModel}</span>
+                            {displayBestModel && (
+                              <span className="ml-2 text-emerald-400">
+                                · Best: {displayBestModel}
+                              </span>
                             )}
                           </p>
-                          <p className="leading-5 text-foreground">{summary}</p>
+                          <p className="leading-5 text-foreground">{displaySummary}</p>
                         </div>
                       )}
                     </article>

@@ -108,6 +108,7 @@ export default function ChatPage() {
         onEvaluate={evaluateAnswers}
         isEvaluating={isEvaluating}
         results={evaluationResults}
+        inferenceMode={inferenceMode}
       />
     </main>
   );

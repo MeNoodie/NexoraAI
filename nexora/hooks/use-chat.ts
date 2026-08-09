@@ -126,7 +126,10 @@ export function useChat() {
         } else {
           // Compare mode: both SFT and DPO answers
           responseText = modelResponses
-            .map((r) => `**[${r.model_name.toUpperCase()} model]**\n\n${r.response_text}`)
+            .map((r) => {
+              const label = r.model_name.toLowerCase() === "rag" ? "DPO" : r.model_name.toUpperCase();
+              return `**[${label} model]**\n\n${r.response_text}`;
+            })
             .join("\n\n---\n\n");
         }
 
