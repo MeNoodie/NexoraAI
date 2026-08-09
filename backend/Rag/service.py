@@ -14,9 +14,6 @@ from backend.prompts.prompts import RAG_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
-
-
-
 class RagService:
     """Orchestrates retrieval, generation, session management, and evaluation.
 
